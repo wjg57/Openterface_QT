@@ -95,6 +95,9 @@ void ToolbarManager::setupToolbar()
         "}"
     );
     toolbar->addWidget(m_layoutComboBox);
+    // Populate keyboard layout selector (already created in rebuildToolbar)
+    populateLayoutSelector();
+
     connect(m_layoutComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ToolbarManager::onLayoutChanged);
 
@@ -123,8 +126,6 @@ void ToolbarManager::setupToolbar()
     connect(repeatingKeystrokeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ToolbarManager::onRepeatingKeystrokeChanged);
 
-    // Populate keyboard layout selector (already created in rebuildToolbar)
-    populateLayoutSelector();
 }
 
 void ToolbarManager::rebuildToolbar()
