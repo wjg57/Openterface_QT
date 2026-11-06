@@ -223,7 +223,7 @@ void TargetControlPage::applySettings()
     qCDebug(log_target_control) << "[TargetControlPage] Current thread:" << QThread::currentThread();
     qCDebug(log_target_control) << "[TargetControlPage] QApplication thread:" << qApp->thread();
 
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
 
     // Save the selected operating mode
     int selectedMode = operatingModeGroup->checkedId();
@@ -287,7 +287,7 @@ QByteArray TargetControlPage::convertCheckBoxValueToBytes(){
 
 void TargetControlPage::initHardwareSetting()
 {
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
 
     // Initialize operating mode
     int operatingMode = settings.value("hardware/operatingMode", 2).toInt(); // Default to keyboard+mouse mode (2)

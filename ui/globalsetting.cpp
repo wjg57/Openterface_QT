@@ -36,7 +36,7 @@
 
 GlobalSetting::GlobalSetting(QObject *parent)
     : QObject(parent),
-      m_settings("Techxartisan", "Openterface")
+      m_settings("TechxArtisan", "Openterface")
 {
 }
 

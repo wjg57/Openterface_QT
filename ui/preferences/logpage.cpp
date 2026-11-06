@@ -711,7 +711,7 @@ void LogPage::browseLogPath()
 
 void LogPage::initLogSettings()
 {
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
 
     // Populate the category tree from the registry
     populateCategoryTree();
@@ -757,7 +757,7 @@ void LogPage::applySettings()
     LogHandler::instance().setFileLoggingEnabled(storeLog, logFilePath);
 
     // Also persist log file path
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     settings.setValue("log/storeLog", storeLog);
     settings.setValue("log/logFilePath", logFilePath);
 

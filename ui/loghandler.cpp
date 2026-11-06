@@ -28,7 +28,7 @@ void LogHandler::install()
     if (s_installed) return;
 
     // Read settings to determine file logging state
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     s_fileLoggingEnabled = settings.value("log/storeLog", false).toBool();
 
     if (s_fileLoggingEnabled) {
@@ -66,7 +66,7 @@ void LogHandler::setFileLoggingEnabled(bool enabled, const QString& path)
 
 QString LogHandler::getLogFilePath() const
 {
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     QString userPath = settings.value("log/logFilePath").toString();
 
     if (!userPath.isEmpty()) {
@@ -95,7 +95,7 @@ void LogHandler::shutdown()
 void LogHandler::enableLogStore()
 {
     // Backward-compatible entry point: re-read settings and update file logging
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     bool storeLog = settings.value("log/storeLog", false).toBool();
     QString logFilePath = settings.value("log/logFilePath").toString();
     setFileLoggingEnabled(storeLog, logFilePath);

@@ -645,7 +645,7 @@ void VideoPage::applySettings() {
 }
 
 void VideoPage::initVideoSettings() {
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
 
     int width = settings.value("video/width", 1920).toInt();
     int height = settings.value("video/height", 1080).toInt();

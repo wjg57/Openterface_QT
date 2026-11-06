@@ -103,7 +103,7 @@ void SerialPortDebugDialog::createLayout(){
 
 void SerialPortDebugDialog::saveSettings()
 {
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     for (const auto& filter : FILTERS) {
         if (auto* checkbox = filterCheckboxWidget->findChild<QCheckBox*>(filter.name)) {
             settings.setValue(QString("filter/%1").arg(filter.name), checkbox->isChecked());

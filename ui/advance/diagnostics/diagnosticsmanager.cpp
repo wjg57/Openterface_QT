@@ -1161,7 +1161,7 @@ bool DiagnosticsManager::performHighBaudrateTest()
     try {
         // Build command to switch to 115200 baudrate (similar to applyCommandBasedBaudrateChange)
         QByteArray command;
-        static QSettings settings("Techxartisan", "Openterface");
+        static QSettings settings("TechxArtisan", "Openterface");
         uint8_t mode = (settings.value("hardware/operatingMode", 0x02).toUInt());
         
         appendToLog("Attempting to switch to 115200 baudrate using command-based method...");

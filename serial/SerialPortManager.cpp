@@ -1037,7 +1037,7 @@ ConfigResult SerialPortManager::sendAndProcessConfigCommand() {
                              << "PID:" << QString("%1").arg(config.pid, 4, 16, QChar('0')).toUpper()
                              << "custom_usb_desc:" << QString("0x%1").arg(config.custom_usb_desc, 2, 16, QChar('0'));
     
-    static QSettings settings("Techxartisan", "Openterface");
+    static QSettings settings("TechxArtisan", "Openterface");
     Q_UNUSED(settings.value("hardware/operatingMode", 0x02).toUInt()); // hostConfigMode unused in this context
     result.mode = config.mode;
     result.success = true;
@@ -2752,7 +2752,7 @@ bool SerialPortManager::reconfigureHidChip(int targetBaudrate)
         return false;
     }
     
-    static QSettings settings("Techxartisan", "Openterface");
+    static QSettings settings("TechxArtisan", "Openterface");
     uint8_t mode = (settings.value("hardware/operatingMode", 0x02).toUInt());
     qCDebug(log_core_serial_config) << "Reconfigure to baudrate to" << targetBaudrate << "and mode 0x" << QString::number(mode, 16);
     
@@ -3158,7 +3158,7 @@ void SerialPortManager::setUSBconfiguration(int targetBaudrate){
     qCDebug(log_core_serial_conn) << "  - serialPort=" << static_cast<void*>(serialPort);
     qCDebug(log_core_serial_conn) << "  - isOpen=" << (serialPort && serialPort->isOpen());
     
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     uint8_t mode = (settings.value("hardware/operatingMode", 0x02).toUInt());
     qCDebug(log_core_serial_config) << "  - Mode from settings: 0x" << QString::number(mode, 16);
 
@@ -3227,7 +3227,7 @@ void SerialPortManager::changeUSBDescriptor() {
     qCDebug(log_core_serial_conn) << "  - serialPort=" << static_cast<void*>(serialPort);
     qCDebug(log_core_serial_conn) << "  - isOpen=" << (serialPort && serialPort->isOpen());
     
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     
     QString USBDescriptors[3];
     USBDescriptors[0] = settings.value("serial/customVIDDescriptor", "www.openterface.com").toString(); // 00
@@ -4163,7 +4163,7 @@ void SerialPortManager::stopConnectionWatchdog()
 bool SerialPortManager::applyCommandBasedBaudrateChange(int baudRate, const QString& logPrefix)
 {
     QByteArray command;
-    static QSettings settings("Techxartisan", "Openterface");
+    static QSettings settings("TechxArtisan", "Openterface");
     uint8_t mode = (settings.value("hardware/operatingMode", 0x02).toUInt());
 
     if (baudRate == BAUDRATE_LOWSPEED) {

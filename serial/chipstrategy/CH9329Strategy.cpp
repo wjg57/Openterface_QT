@@ -121,7 +121,7 @@ bool CH9329Strategy::performReset(
     targetBaudrate = validateBaudrate(targetBaudrate);
     
     // Get the mode from settings
-    QSettings settings("Techxartisan", "Openterface");
+    QSettings settings("TechxArtisan", "Openterface");
     uint8_t mode = settings.value("hardware/operatingMode", 0x02).toUInt();
     
     // Build and send reconfiguration command
