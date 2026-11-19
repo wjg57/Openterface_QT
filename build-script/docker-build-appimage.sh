@@ -1,319 +1,350 @@
 #!/bin/bash
+#
+# NAME:
+# 	docker-build-appimage.sh -- build AppImage in docker container
+#
+# SYNOPSIS:
+# 	docker run -rm \
+# 	  -v "${PROJECT_DIR}:/workspace/src" \
+# 	  -w "/workspace/src" \
+# 	  "${DOCKER_IMAGE}" \
+# 	  bash -c "build/docker-build-appimage.sh"
 
-set -uo pipefail
-IFS=$'\n\t'
+# wjg: Fail on unhandled errors even in pipelines and unset variables:
+#	Don't change that because ignoring errors makes this less resilient
+#	and much harder to debug!
+set -euo pipefail
 
-# Disable exit-on-error for non-critical operations
-# Re-enable with "set -e" when needed
-ORIGINAL_OPTS="$-"
+# Useful messaging functions
+dbg() { [ "${DEBUG:-no}" = no ] || echo "$@" >&2; }
+msg() { echo "$@" >&2; }
+ok()  { echo "✅ $@" >&2; }
+inf() { echo "ℹ️  $@" >&2; }
+wrn() { echo "⚠️  WARNING: $@" >&2; }
+err() { echo "❌ ERROR:   $@" >&2; }
+fat() { echo "💀 FATAL:   $@" >&2; exit 1; }
 
-APPIMAGE_DIR="${BUILD_DIR}/appimage"
 # Set up variables for comprehensive AppImage creation
 SRC="/workspace/src"
-BUILD="/workspace/build" 
+BUILD_DIR="${SRC}/build" 
+APPIMAGE_DIR="${BUILD_DIR}/appimage"
 APPDIR="${APPIMAGE_DIR}/AppDir"
 DESKTOP_OUT="${APPDIR}/openterfaceqt.desktop"
-APPIMAGE_OUT="${BUILD}"
-# Create comprehensive AppDir structure for the final AppImage
-mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/lib" "${APPDIR}/usr/share/applications" "${APPDIR}/usr/share/pixmaps"
-mkdir -p "${APPDIR}/usr/lib/qt6/plugins/platforms" "${APPDIR}/usr/lib/qt6/plugins/wayland-shell-integration" "${APPDIR}/usr/lib/qt6/plugins/wayland-decoration-client"
+APPIMAGE_OUT="${BUILD_DIR}"
+OPENTERFACE_BUILD_STATIC=${OPENTERFACE_BUILD_STATIC:-OFF}
 
-# Enhanced AppImage build script with comprehensive GStreamer plugin support
-# This script builds an AppImage with all necessary GStreamer plugins for video capture
+# Some sanity checks:
+#	Do workspace and build directories exist?
+[ -d "$SRC" ] || fat "workspace not found! Are you running in docker?"
+[ -d "$BUILD_DIR" ] || fat "build not found! Have you run the docker build?"
 
-echo "Building Enhanced Openterface AppImage with GStreamer plugins..."
-
-# Determine architecture
+# FIXME: Is the additional APPIMAGE_ARCH necessary?
+# 	Reason: This must run in a container of the appropriate ARCH, so
+# 		APPIMAGE_ARCH === ARCH?!?
 ARCH=$(uname -m)
-case "${ARCH}" in
-    aarch64|arm64) APPIMAGE_ARCH=aarch64;;
-    x86_64|amd64) APPIMAGE_ARCH=x86_64;;
-    *) APPIMAGE_ARCH=${ARCH};;
+case $ARCH in
+aarch64|arm64)	APPIMAGE_ARCH=aarch64;;
+x86_64|amd64)	APPIMAGE_ARCH=x86_64;;
+*)		APPIMAGE_ARCH=$ARCH;;
 esac
 
-# Create build directory
-mkdir -p "${BUILD_DIR}" "${APPIMAGE_DIR}"
+# Determine version from resources/version.h
+if [ -r "$SRC/resources/version.h" ]
+then
+	VERSION=$(sed <"$SRC/resources/version.h" -ne 's/.* APP_VERSION "\([^"]*\).*/\1/p')
+else
+	VERSION=unknown
+fi
 
-# ============================================================
-# Generic library copying function (from docker-build-deb.sh)
-# ============================================================
-# This function eliminates code duplication for library copying
-# Usage: copy_libraries "VARNAME" "Display Name" "lib_pattern" "ERROR|WARNING" "target_dir" "search_dir1" "search_dir2" ...
+# Enhanced AppImage build script with comprehensive GStreamer plugin support
+#	This script builds an AppImage with all necessary GStreamer plugins
+#	for video capture.
+msg "Building gstreamer enhanced Openterface AppImage version: ${VERSION}"
+
+# Generic library copying function
+#	copy_libraries "lpattern" ERROR|WARNING|FATAL tgt_dir [search_dir ...]
+# Modified to generate much less noise, so warnings and errors become visible.
 copy_libraries() {
-    local var_name="$1"
-    local display_name="$2"
-    local lib_pattern="$3"
-    local severity="$4"  # ERROR or WARNING
-    local target_dir="$5"
-    shift 5
-    local search_dirs=("$@")
+    local lpattern="$1"
+    local severity="$2"  # ERROR or WARNING or FATAL
+    local tgtdir="$3"
+    shift 3
+    local sdirs=("$@")
     
-    echo "📋 APPIMAGE: Searching for ${display_name} libraries..."
+    dbg "Searching for $lpattern libraries..."
     local found=0
     
-    for search_dir in "${search_dirs[@]}"; do
-        echo "   Checking: $search_dir"
+    for search_dir in "${sdirs[@]}"
+    do
+        dbg "Checking: $search_dir"
         if [ -d "$search_dir" ]; then
-            if ls "$search_dir"/${lib_pattern}* >/dev/null 2>&1; then
-                echo "   ✅ Found ${display_name} in $search_dir"
-                local files=$(ls -la "$search_dir"/${lib_pattern}* 2>/dev/null)
-                echo "   Files found:"
-                echo "$files" | sed 's/^/     /'
-                # Copy both actual files AND symlinks to preserve library versioning chains
-                find "$search_dir" -maxdepth 1 -name "${lib_pattern}*" \( -type f -o -type l \) -exec cp -avP {} "${target_dir}/" \; 2>&1 | sed 's/^/     /'
-                echo "   ✅ ${display_name} libraries copied to ${target_dir}"
-                found=1
+            if ls "$search_dir"/${lpattern}* >/dev/null 2>&1; then
+		found=1
+                dbg "Found $lpattern in $search_dir"
+                local files=$(ls -la "$search_dir"/${lpattern}* 2>/dev/null)
+		dbg $(echo "$files" | sed 's/^/     /')
+                # Copy both actual files AND symlinks to preserve
+		# library versioning chains!
+		[ "${DEBUG:-no}" != no ] && opts=avP || opts=aP
+		failed=0
+		for file in $(find "$search_dir" -maxdepth 1 -name "${lpattern}*" \( -type f -o -type l \) -print)
+	        do
+			msg=$(cp -$opts "$file" "$tgtdir/" 2>&1) || failed=1
+			dbg "$msg"
+		done
+		if [ $failed = 0 ]
+		then
+			ok "$lpattern libraries copied to $tgtdir"
+		elif [ $severity != FATAL ]
+		then
+			err "$lpattern libraries NOT copied to $tgtdir"
+		else
+			fat "$lpattern libraries NOT copied to $tgtdir"
+		fi
                 break
-            else
-                echo "   ✗ No ${display_name} found in $search_dir"
-            fi
-        else
-            echo "   ✗ Directory does not exist: $search_dir"
+	    fi
         fi
     done
     
-    if [ $found -eq 0 ]; then
-        if [ "$severity" = "ERROR" ]; then
-            echo "❌ ERROR: ${display_name} libraries not found in any search path!"
-        else
-            echo "⚠️  Warning: ${display_name} libraries not found"
-        fi
-    else
-        echo "✅ ${display_name} found and copied"
+    if [ $found -eq 0 ]
+    then
+	    case $severity in
+	    WARNING)	wrn "$lpattern libraries not found.";;
+	    ERROR)	err "$lpattern libraries not found!";;
+	    FATAL)	fat "$lpattern libraries not found!";;
+	    esac
     fi
-    
-    # Export result as a variable (e.g., GSTREAMER_FOUND=1)
-    eval "${var_name}_FOUND=$found"
 }
 
-echo "Detecting GStreamer plugin directories..."
-
 # Detect GStreamer plugins in container
-GSTREAMER_HOST_DIRS=(
-	"/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0"
-	"/opt/gstreamer/lib/${ARCH}-linux-gnu/"
-    "/usr/lib/${ARCH}-linux-gnu/gstreamer-1.0"
-    "/usr/lib/gstreamer-1.0"
-)
-
+# 	Uses first directory found - sequence matters!
 GSTREAMER_HOST_DIR=""
-for dir in "${GSTREAMER_HOST_DIRS[@]}"; do
-    if [ -d "$dir" ]; then
-        GSTREAMER_HOST_DIR="$dir"
-        echo "✅ Found GStreamer plugin directory: $GSTREAMER_HOST_DIR"
-        break
-    fi
+for dir in \
+	"/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0" \
+	"/opt/gstreamer/lib/${ARCH}-linux-gnu/" \
+	"/usr/lib/${ARCH}-linux-gnu/gstreamer-1.0" \
+	"/usr/lib/gstreamer-1.0"
+do
+	if [ -d "$dir" ]
+	then
+		GSTREAMER_HOST_DIR="$dir"
+		ok "Found gstreamer plugin directory: $GSTREAMER_HOST_DIR"
+		break
+	fi
 done
 
-if [ -z "$GSTREAMER_HOST_DIR" ] || [ ! -f "$GSTREAMER_HOST_DIR/libgstvideo4linux2.so" ]; then
-    echo "❌ GStreamer V4L2 plugin not found in container!"
-    echo "Installing GStreamer plugins in container..."
-    apt update && apt install -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
-    
-    # Retry detection after installation
-    for dir in "${GSTREAMER_HOST_DIRS[@]}"; do
-        if [ -d "$dir" ] && [ -f "$dir/libgstvideo4linux2.so" ]; then
-            GSTREAMER_HOST_DIR="$dir"
-            echo "✅ Found GStreamer plugins after installation: $GSTREAMER_HOST_DIR"
-            break
-        fi
-    done
-    
-    if [ -z "$GSTREAMER_HOST_DIR" ]; then
-        echo "❌ Still no GStreamer plugins found after installation!"
-        exit 1
-    fi
-fi
+# Sanity check:
+[ -n "$GSTREAMER_HOST_DIR" ] ||
+	fat "gstreamer plugins not found. Install them and re-run build!"
+[ -f "$GSTREAMER_HOST_DIR/libgstvideo4linux2.so" ] ||
+	fat "gstreamer V4L2 plugin not found. Install it and re-run build!"
 
-# Determine version from resources/version.h
-VERSION_H="/workspace/src/resources/version.h"
-if [ -f "${VERSION_H}" ]; then
-    VERSION=$(grep '^#define APP_VERSION' "${VERSION_H}" | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1)
-fi
-if [ -z "${VERSION}" ]; then
-    VERSION="0.4.3.248"
-fi
+# NOTE: Previous code had logic to install gstreamer plugins here, which
+#	is too late and could cause inconsistencies.
+#	Use apt to install:
+#		gstreamer1.0-plugins-base
+#		gstreamer1.0-plugins-good
+#		gstreamer1.0-plugins-bad
+#	then re-run the build.
 
-echo "Building AppImage version: ${VERSION}"
+# Create comprehensive AppDir structure for the final AppImage
+rm -rf "${APPDIR}"
+mkdir -p "${APPDIR}/usr/bin" \
+	"${APPDIR}/usr/share/applications" \
+	"${APPDIR}/usr/share/icons/hicolor/128x128/apps" \
+	"${APPDIR}/usr/share/icons/hicolor/256x256/apps" \
+	"${APPDIR}/usr/share/metainfo" \
+	"${APPDIR}/usr/share/openterfaceQT/translations" \
+	"${APPDIR}/usr/share/pixmaps" \
+	"${APPDIR}/usr/libexec/gstreamer-1.0" \
+	"${APPDIR}/usr/lib/gstreamer-1.0" \
+	"${APPDIR}/usr/lib/openterfaceqt/ffmpeg" \
+	"${APPDIR}/usr/lib/plugins/platforms" \
+	"${APPDIR}/usr/lib/qt6/plugins/platforms" \
+	"${APPDIR}/usr/lib/qt6/plugins/wayland-shell-integration" \
+	"${APPDIR}/usr/lib/qt6/plugins/wayland-decoration-client"
 
-echo "🎯 Creating AppImage with essential GStreamer plugins..."
+# Copy binary:
+cp ${BUILD_DIR}/openterfaceQT ${APPDIR}/usr/bin/openterfaceQT.bin
+chmod +x ${APPDIR}/usr/bin/openterfaceQT.bin
 
-# Create enhanced AppImage
-cd /workspace
-rm -rf appimage/AppDir
-mkdir -p appimage/AppDir/usr/bin appimage/AppDir/usr/lib/gstreamer-1.0 appimage/AppDir/usr/share/applications
+# Copy libraries:
+#
+# NOTE: DO NOT bundle GLIBC libraries (libc.so.6, libm.so.6, libpthread.so.0,
+# 	etc.) The AppImage must use the system's GLIBC to avoid version
+# 	conflicts. linuxdeploy correctly excludes these, and we rely on the
+# 	AppRun script's LD_LIBRARY_PATH to ensure proper library loading order.
+# NOTE: This is a heavily stripped down (aka made readable) version of the
+# 	original code.
+#
+# Format of here document:
+# 	E|W|F lpattern [tgtsub] [sdirs ...]
+#       	where tgtsub is a subdirectory of /usr/lib and sdirs is a
+#       	list of source directories to search through with a list of
+#       	system library directorie always appended. When library
+#       	specific sdirs are specified you must use . to install
+#       	them in /usr/lib.
+#       S list of additional search dirs. Inserted between library specific
+#         sdirs and the system defaults.
+#	Lines starting with anything else are ignored.
+S=""
+while read severity lpattern tgtsub search
+do
+	case $severity in
+	F) severity=FATAL;;
+	E) severity=ERROR;;
+	W) severity=WARNING;;
+	S) S="$lpattern $tgtsub $search"; continue;;
+	*) continue;;
+	esac
+	copy_libraries "$lpattern" $severity \
+		"$APPDIR/usr/lib/${tgtsub:-.}/" \
+		$search $S \
+		/usr/lib/${ARCH}-linux-gnu /lib/${ARCH}-linux-gnu \
+		/lib64 /lib /usr/lib
+done <<-EOF
+# C++ runtime libraries (CRITICAL for Qt/C++ applications)
+S
+E libgcc_s.so
+E libstdc++.so 
 
-echo '✅ Executable copied'
-cp build/openterfaceQT appimage/AppDir/usr/bin/openterfaceQT.bin
-chmod +x appimage/AppDir/usr/bin/openterfaceQT.bin
+# Critical system libraries (libusb, libdrm, libudev)
+S
+E libusb*.so . /opt/ffmpeg/lib /opt
+E libdrm.so
+E libudev.so
 
+# Coreutils support
+S 
+E libstdbuf.so . /usr/libexec/coreutils /opt
 
-echo '📦 Copying critical GLIBC libraries for compatibility...'
-# Create target directories for initial AppDir
-mkdir -p "appimage/AppDir/usr/lib"
+# JPEG libraries
+S /opt/ffmpeg/lib
+E libjpeg.so
+E libturbojpeg.so
+E libpostproc.so openterfaceqt/ffmpeg
+W libmfx.so openterfaceqt/ffmpeg
 
-# ============================================================
-# Define unified library copying configurations
-# Format: variable_name|display_name|lib_pattern|severity|target_subdir|search_dirs...
-# target_subdir: "" (root) or subdirectory path
-# ============================================================
+# FFmpeg libraries -> AppImage bundle under /usr/lib/openterfaceqt/ffmpeg
+S /opt/ffmpeg/lib
+W libavdevice.so openterfaceqt/ffmpeg
+W libavcodec.so openterfaceqt/ffmpeg
+W libavformat.so openterfaceqt/ffmpeg
+W libavutil.so openterfaceqt/ffmpeg
+W libswscale.so openterfaceqt/ffmpeg
+W libswresample.so openterfaceqt/ffmpeg
+W libavfilter.so openterfaceqt/ffmpeg
 
-# Merged comprehensive AppImage library configurations
-# Format: variable_name|display_name|lib_pattern|severity|target_subdir|search_dirs...
-# Combines initial pass and comprehensive pass into single unified array
-declare -a APPIMAGE_LIBRARY_CONFIGS=(
-    # NOTE: DO NOT bundle GLIBC libraries (libc.so.6, libm.so.6, libpthread.so.0, etc.)
-    # The AppImage must use the system's GLIBC to avoid version conflicts.
-    # linuxdeploy correctly excludes these, and we rely on the AppRun script's LD_LIBRARY_PATH
-    # to ensure proper library loading order.
-    
-    # C++ runtime libraries (CRITICAL for Qt/C++ applications)
-    "GCC_S|libgcc_s|libgcc_s.so|ERROR||/usr/lib/${ARCH}-linux-gnu /lib/${ARCH}-linux-gnu /lib64 /lib /usr/lib"
-    "STDCXX|libstdc++|libstdc++.so|ERROR||/usr/lib/${ARCH}-linux-gnu /lib/${ARCH}-linux-gnu /lib64 /lib /usr/lib"
-    
-    # Critical system libraries (libusb, libdrm, libudev)
-    "LIBUSB|libusb|libusb*.so|ERROR||/opt/ffmpeg/lib /opt /usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "LIBDRM|libdrm|libdrm.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "LIBUDEV|libudev|libudev.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    
-    # Coreutils support
-    "STDBUF|libstdbuf|libstdbuf.so|WARNING||/usr/libexec/coreutils /opt /usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    
-    # JPEG libraries
-    "JPEG|libjpeg|libjpeg.so|WARNING||/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-    "TURBOJPEG|libturbojpeg|libturbojpeg.so|WARNING||/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"POSTPROC|FFmpeg postproc|libpostproc.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"MFX|Intel Media SDK|libmfx.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	# FFmpeg libraries -> AppImage bundle under /usr/lib/openterfaceqt/ffmpeg
-	"AVDEVICE|FFmpeg avdevice|libavdevice.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"AVCODEC|FFmpeg avcodec|libavcodec.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"AVFORMAT|FFmpeg avformat|libavformat.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"AVUTIL|FFmpeg avutil|libavutil.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"SWSCALE|FFmpeg swscale|libswscale.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"SWRESAMPLE|FFmpeg swresample|libswresample.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-	"AVFILTER|FFmpeg avfilter|libavfilter.so|WARNING|openterfaceqt/ffmpeg|/opt/ffmpeg/lib /usr/lib/${ARCH}-linux-gnu /usr/lib"
-    
-    # Compression libraries
-    "BZ2|libbz2|libbz2.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib"
-    
-    # EGL and GPU rendering libraries (with wildcard patterns to match all versions)
-    "EGL|libEGL|libEGL.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "GL|libGL|libGL.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "GLX|libGLX|libGLX.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "GLESV2|libGLESv2|libGLESv2.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "GLVND|libglvnd|libglvnd.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "GLDISPATCH|libGLdispatch|libGLdispatch.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    "OPENGL|libOpenGL|libOpenGL.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /usr/lib64 /lib"
-    
-    # Qt platform plugins (CRITICAL for GUI applications)
-    "QTPLUGIN_XCB|Qt6 XCB platform|libqxcb.so|ERROR|plugins/platforms|/opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms"
-    "QTPLUGIN_WAYLAND_EGL|Qt6 Wayland EGL|libqwayland-egl.so|WARNING|plugins/platforms|/opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms"
-    "QTPLUGIN_WAYLAND_GENERIC|Qt6 Wayland Generic|libqwayland-generic.so|WARNING|plugins/platforms|/opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms"
-    "QTPLUGIN_OFFSCREEN|Qt6 Offscreen|libqoffscreen.so|WARNING|plugins/platforms|/opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms"
-    "QTPLUGIN_MINIMAL|Qt6 Minimal|libqminimal.so|WARNING|plugins/platforms|/opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms"
-    
-    # Wayland dependencies (required for wayland plugin)
-    "WAYLAND_CLIENT|libwayland-client|libwayland-client.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "WAYLAND_CURSOR|libwayland-cursor|libwayland-cursor.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "WAYLAND_EGL|libwayland-egl|libwayland-egl.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "XKBCOMMON|libxkbcommon|libxkbcommon.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    
-    # XCB dependencies (required by xcb plugin)
-    "XCB_CURSOR|libxcb-cursor|libxcb-cursor.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "XCB|libxcb|libxcb.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    
-    # Qt platform plugin libraries (also as system libraries for backup copy)
-    "QTLIB_MINIMAL|Qt6 Minimal plugin library|libqminimal.so|WARNING||/opt/Qt6/plugins/platforms /opt/Qt6/lib /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "QTLIB_OFFSCREEN|Qt6 Offscreen plugin library|libqoffscreen.so|WARNING||/opt/Qt6/plugins/platforms /opt/Qt6/lib /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    "XCB|libxcb|libxcb.so|WARNING||/usr/lib/${ARCH}-linux-gnu /usr/lib /lib/${ARCH}-linux-gnu /lib"
-    
-    # Essential GStreamer plugins for video capture
-    "GSTV4L2|GStreamer V4L2|libgstvideo4linux2.so|ERROR|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTV4L2CODECS|GStreamer V4L2 codecs|libgstv4l2codecs.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTJPEG|GStreamer JPEG|libgstjpeg.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTCOREELEMENTS|GStreamer core elements|libgstcoreelements.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTAPP|GStreamer app|libgstapp.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTPLAYBACK|GStreamer playback|libgstplayback.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    # GStreamer >= 1.22 ships videoconvert/videoscale in libgstvideoconvertscale.so,
-    # older releases ship them as separate plugins - bundle whichever exists.
-    "GSTVIDEOCONVERTSCALE|GStreamer video convert/scale|libgstvideoconvertscale.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTVIDEOCONVERT|GStreamer video convert|libgstvideoconvert.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTVIDEOSCALE|GStreamer video scale|libgstvideoscale.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTVIDEOTESTSRC|GStreamer video test source|libgstvideotestsrc.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTVIDEOFILTER|GStreamer video filters|libgstvideofilter.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTVIDEORATE|GStreamer video rate|libgstvideorate.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTXIMAGESINK|GStreamer X image sink|libgstximagesink.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTXVIMAGESINK|GStreamer XV image sink|libgstxvimagesink.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTPULSEAUDIO|GStreamer PulseAudio|libgstpulseaudio.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTAUDIOPARSERS|GStreamer audio parsers|libgstaudioparsers.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTAUDIOCONVERT|GStreamer audio convert|libgstaudioconvert.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTAUDIORESAMPLE|GStreamer audio resample|libgstaudioresample.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTAUTOPLUG|GStreamer autodetect|libgstautodetect.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    "GSTTYPEFIND|GStreamer type find|libgsttypefindfunctions.so|WARNING|gstreamer-1.0|/opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
-    
-    # System loader
-    "LDLINUX|Linux dynamic linker|ld-linux-x86-64.so.2|WARNING||/usr/lib/${ARCH}-linux-gnu /lib64 /lib /usr/lib"
-)
+# Compression and other system libraries
+S
+W libbz2.so
+W libz.so
+W liblzma.so
 
-# Process merged AppImage library configurations for initial AppDir
-echo "🔍 Copying required libraries to initial AppImage AppDir..."
-mkdir -p "${APPDIR}/usr/lib"
-mkdir -p "${APPDIR}/usr/lib/openterfaceqt/ffmpeg"
-for config in "${APPIMAGE_LIBRARY_CONFIGS[@]}"; do
-    IFS='|' read -r var_name display_name lib_pattern severity target_subdir search_dirs_str <<< "$config"
-    
-    # Determine full target directory
-    if [ -z "$target_subdir" ]; then
-        target_dir="${APPDIR}/usr/lib"
-    else
-        target_dir="${APPDIR}/usr/lib/${target_subdir}"
-        mkdir -p "$target_dir"
-    fi
-    
-    # Split search directories (reset IFS to default for proper space splitting)
-    IFS=' ' read -ra search_dirs <<< "$search_dirs_str"
-    
-    copy_libraries "$var_name" "$display_name" "$lib_pattern" "$severity" "$target_dir" "${search_dirs[@]}"
-done
+W libffi.so
+W libgobject.so
+W libgmodule.so
+W libpcre.so
+W libelf.so
+W libdw.so
 
-echo '✅ All GLIBC, critical, GPU, and GStreamer libraries copied'
+# EGL and GPU rendering libraries (with wildcard patterns to match all versions)
+S
+W libEGL.so
+W libGL.so
+W libGLX.so
+W libGLESv2.so
+W libglvnd.so
+W libGLdispatch.so
+W libOpenGL.so
 
-# Without videoconvert/videoscale GStreamer cannot build the capture pipeline at all
-# (the QImage fallback branch needs videoconvert too). Fail packaging instead of
-# silently shipping an AppImage that shows a black video pane.
+# Qt platform plugins (CRITICAL for GUI applications)
+S /opt/Qt6/plugins/platforms /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms
+E libqxcb.so plugins/platforms
+W libqwayland-egl.so plugins/platforms
+W libqwayland-generic.so plugins/platforms
+W libqoffscreen.so plugins/platforms
+W libqminimal.so plugins/platforms
+
+# Wayland dependencies (required for wayland plugin)
+S
+W libwayland-client.so
+W libwayland-cursor.so
+W libwayland-egl.so
+W libxkbcommon.so
+
+# XCB dependencies (required by xcb plugin)
+S
+W libxcb-cursor.so
+W libxcb.so
+
+# Qt platform plugin libraries (also as system libraries for backup copy)
+S /opt/Qt6/plugins/platforms /opt/Qt6/lib /usr/lib/qt6/plugins/platforms /usr/lib/${ARCH}-linux-gnu/qt6/plugins/platforms
+W libqminimal.so
+W libqoffscreen.so
+
+# Essential GStreamer plugins for video capture
+S /opt/gstreamer/lib/${ARCH}-linux-gnu/gstreamer-1.0 /opt/gstreamer/lib/gstreamer-1.0 /usr/lib/${ARCH}-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0"
+E libgstreamer-1.0.so gstreamer-1.0
+E libgstvideo4linux2.so gstreamer-1.0
+W libgstv4l2codecs.so gstreamer-1.0
+W libgstjpeg.so gstreamer-1.0
+W libgstcoreelements.so gstreamer-1.0
+W libgstapp.so gstreamer-1.0
+W libgstplayback.so gstreamer-1.0
+# GStreamer >= 1.22 ships videoconvert/videoscale in libgstvideoconvertscale.so,
+# older releases ship them as separate plugins - bundle whichever exists.
+W libgstvideoconvertscale.so gstreamer-1.0
+#W libgstvideoconvert.so gstreamer-1.0
+#W libgstvideoscale.so gstreamer-1.0
+W libgstvideotestsrc.so gstreamer-1.0
+W libgstvideofilter.so gstreamer-1.0
+W libgstvideorate.so gstreamer-1.0
+W libgstximagesink.so gstreamer-1.0
+W libgstxvimagesink.so gstreamer-1.0
+W libgstpulseaudio.so gstreamer-1.0
+W libgstaudioparsers.so gstreamer-1.0
+W libgstaudioconvert.so gstreamer-1.0
+W libgstaudioresample.so gstreamer-1.0
+W libgstautodetect.so gstreamer-1.0
+W libgsttypefindfunctions.so gstreamer-1.0
+
+# System loader
+S
+W ld-linux-x86-64.so.2
+EOF
+
+# Without videoconvert/videoscale GStreamer cannot build the capture pipeline
+# at all (the QImage fallback branch needs videoconvert too). Fail packaging
+# instead of silently shipping an AppImage that shows a black video pane.
+# Can't do this during copy, as we have ann either/or situation for the libs.
 GST_BUNDLE_DIR="${APPDIR}/usr/lib/gstreamer-1.0"
 GST_MISSING=""
-if [ ! -e "${GST_BUNDLE_DIR}/libgstvideoconvert.so" ] && [ ! -e "${GST_BUNDLE_DIR}/libgstvideoconvertscale.so" ]; then
-    GST_MISSING="${GST_MISSING} videoconvert"
-fi
-if [ ! -e "${GST_BUNDLE_DIR}/libgstvideoscale.so" ] && [ ! -e "${GST_BUNDLE_DIR}/libgstvideoconvertscale.so" ]; then
-    GST_MISSING="${GST_MISSING} videoscale"
-fi
+[ -e "${GST_BUNDLE_DIR}/libgstvideoconvert.so" -o -e "${GST_BUNDLE_DIR}/libgstvideoconvertscale.so" ] || GST_MISSING="${GST_MISSING} videoconvert"
+[ -e "${GST_BUNDLE_DIR}/libgstvideoscale.so" -o -e "${GST_BUNDLE_DIR}/libgstvideoconvertscale.so" ] || GST_MISSING="${GST_MISSING} videoscale"
 [ -e "${GST_BUNDLE_DIR}/libgstvideotestsrc.so" ] || GST_MISSING="${GST_MISSING} videotestsrc"
-if [ -n "${GST_MISSING}" ]; then
-    echo "❌ ERROR: Bundled GStreamer plugin directory is missing required elements:${GST_MISSING}"
-    echo "   Expected videoconvert/videoscale/videotestsrc from gstreamer1.0-plugins-base."
-    exit 1
-fi
-echo "✅ Verified videoconvert/videoscale/videotestsrc plugins in AppImage bundle"
-
+[ -z "${GST_MISSING}" ] || fat "Bundled GStreamer is missing required plugins: ${GST_MISSING}"
+ 
 # Diagnostic: Verify critical libraries were actually copied
-echo ""
-echo "🔍 Diagnostic: Verifying GPU libraries in appimage/AppDir/usr/lib..."
-echo "   Checking for libEGL libraries:"
-ls -1 appimage/AppDir/usr/lib/libEGL* 2>/dev/null || echo "   ⚠️  NO libEGL files found!"
-echo "   Checking for libGL libraries:"
-ls -1 appimage/AppDir/usr/lib/libGL* 2>/dev/null || echo "   ⚠️  NO libGL files found!"
-echo "   Total .so files in appimage/AppDir/usr/lib:"
-find appimage/AppDir/usr/lib -maxdepth 1 -name "*.so*" -type f -o -type l 2>/dev/null | wc -l
-echo ""
+msg "🔍 Diagnostic: Verifying GPU libraries in ${APPDIR}/usr/lib..."
+msg=$(ls -1 ${APPDIR}/usr/lib/libEGL* 2>/dev/null) ||
+	wrn "NO libEGL files found!"
+[ -z "$msg" ] || dbg "$msg"
+msg=$(ls -1 ${APPDIR}/usr/lib/libGL* 2>/dev/null) || wrn "NO libGL files found!"
+[ -z "$msg" ] || dbg "$msg"
+
+# Some statistics:
+dbg "Total .so files in appimage/AppDir/usr/lib: $(find appimage/AppDir/usr/lib -maxdepth 1 -name "*.so*" \( -type f -o -type l \) -print 2>/dev/null | wc -l)"
 
 # Normalize FFmpeg soname symlinks under the openterfaceqt/ffmpeg directory
-if [ -d "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" ]; then
-	echo "🔧 Normalizing FFmpeg symlinks in ${APPDIR}/usr/lib/openterfaceqt/ffmpeg..."
-	pushd "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" >/dev/null || true
-	# Avoid literal globbing when no files found
+if [ -d "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" ]
+then
+	msg "🔧 Normalizing FFmpeg symlinks..."
+
+	# Push library directory and avoid literal globbing.
+	pushd "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" >/dev/null
 	shopt -s nullglob
+
 	# Create symlinks for multi-dot versioned libraries (libname.so.1.2.3)
 	for fullfile in *.so.*.*; do
 		[ -f "$fullfile" ] || continue
@@ -322,18 +353,19 @@ if [ -d "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" ]; then
 		if [ "$soname" != "$fullfile" ]; then
 			if [ ! -L "$soname" ] && [ ! -f "$soname" ]; then
 				ln -sf "$fullfile" "$soname"
-				echo "  ✅ Created symlink: $soname -> $fullfile"
+				dbg "Created symlink: $soname -> $fullfile"
 			elif [ -f "$soname" ]; then
 				rm -f "$soname"
 				ln -sf "$fullfile" "$soname"
-				echo "  ✅ Converted to symlink: $soname -> $fullfile"
+				dbg "Converted to symlink: $soname -> $fullfile"
 			fi
 		fi
 		if [ ! -L "${base}.so" ] && [ ! -f "${base}.so" ]; then
 			ln -sf "$fullfile" "${base}.so"
-			echo "  ✅ Created symlink: ${base}.so -> $fullfile"
+			dbg "Created symlink: ${base}.so -> $fullfile"
 		fi
 	done
+
 	# Also handle single-dot sonames (libname.so.1)
 	for fullfile in *.so.*; do
 		[ -f "$fullfile" ] || continue
@@ -341,170 +373,90 @@ if [ -d "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" ]; then
 		soname=$(echo "$fullfile" | sed 's/\(.*\.so\.[0-9]*\)\.*.*/\1/')
 		if [ ! -L "$soname" ] && [ ! -f "$soname" ]; then
 			ln -sf "$fullfile" "$soname"
-			echo "  ✅ Created symlink: $soname -> $fullfile"
+			dbg "Created symlink: $soname -> $fullfile"
 		fi
 		if [ ! -L "${base}.so" ] && [ ! -f "${base}.so" ]; then
 			ln -sf "$fullfile" "${base}.so"
-			echo "  ✅ Created symlink: ${base}.so -> $fullfile"
+			dbg "Created symlink: ${base}.so -> $fullfile"
 		fi
 	done
-	popd >/dev/null || true
-	# Turn off nullglob now that we are done
+
+	# Pop library directory and allow literal globbing.
+	popd >/dev/null
 	shopt -u nullglob
-	echo "✅ FFmpeg symlink normalization complete"
+
+	ok "FFmpeg symlink normalization complete."
 fi
 
-echo "🔍 Diagnostic: Verifying FFmpeg libraries in appimage/AppDir/usr/lib/openterfaceqt/ffmpeg..."
-ls -1 "${APPDIR}/usr/lib/openterfaceqt/ffmpeg" 2>/dev/null | sed 's/^/   - /' || echo "   ⚠️ No files found"
-echo ""
-
-# ============================================================
-# Copy gst-plugin-scanner if present on the build host/container
-# GStreamer needs a plugin scanner helper binary; many distributions
-# put it under libexec/gstreamer-1.0 or under <prefix>/libexec/gstreamer-1.0.
-# AppRun and main.cpp already look for it at usr/libexec/gstreamer-1.0/gst-plugin-scanner
-# so make sure to copy it into the AppDir if available.
-# ============================================================
+# Copy gst-plugin-scanner
+# GStreamer needs a plugin scanner helper binary; many distributions put it
+# under libexec/gstreamer-1.0 or under <prefix>/libexec/gstreamer-1.0.
+# AppRun and main.cpp look for it at usr/libexec/gstreamer-1.0
 echo "🔍 Looking for gst-plugin-scanner on build host/container..."
-mkdir -p "${APPDIR}/usr/libexec/gstreamer-1.0"
-SCANNER_CANDIDATES=( 
-	"/opt/gstreamer/libexec/gstreamer-1.0/gst-plugin-scanner"
-	"/opt/gstreamer/lib/${ARCH}-linux-gnu/libexec/gstreamer-1.0/gst-plugin-scanner"
-	"/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
-	"/usr/lib/${ARCH}-linux-gnu/libexec/gstreamer-1.0/gst-plugin-scanner"
-	"/usr/lib/${ARCH}-linux-gnu/gstreamer-1.0/gst-plugin-scanner"
-	"/usr/lib/gstreamer-1.0/gst-plugin-scanner"
-	"/usr/bin/gst-plugin-scanner"
-)
 SCANNER_FOUND=""
-for c in "${SCANNER_CANDIDATES[@]}"; do
+for c in "/opt/gstreamer/libexec/gstreamer-1.0/gst-plugin-scanner" \
+	"/opt/gstreamer/lib/${ARCH}-linux-gnu/libexec/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/libexec/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/lib/${ARCH}-linux-gnu/libexec/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/lib/${ARCH}-linux-gnu/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/lib/${ARCH}-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/lib/gstreamer-1.0/gst-plugin-scanner" \
+	"/usr/bin/gst-plugin-scanner"
+do
 	if [ -x "$c" ]; then
-		echo "   ✅ Found gst-plugin-scanner at: $c"
-		cp -avP "$c" "${APPDIR}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+		cp -aP "$c" "${APPDIR}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
 		chmod +x "${APPDIR}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
 		SCANNER_FOUND="$c"
+		ok "Copied gst-plugin-scanner from: $c"
 		break
 	fi
 done
+[ -n "$SCANNER_FOUND" ] ||
+	wrn "No gst-plugin-scanner found in common locations; GStreamer will use host scanner if available"
 
-if [ -z "$SCANNER_FOUND" ]; then
-	echo "   ⚠️  No gst-plugin-scanner found in common locations; GStreamer will use host scanner if available"
-else
-	echo "   ✅ gst-plugin-scanner bundled in AppImage at: usr/libexec/gstreamer-1.0/gst-plugin-scanner"
-fi
-
-
-# Try to find and copy icon
-mkdir -p appimage/AppDir/usr/share/pixmaps
-mkdir -p appimage/AppDir/usr/share/icons/hicolor/256x256/apps
-
-ICON_FOUND=false
-for icon_path in \
-    '/workspace/src/images/icon_256.png' \
-    '/workspace/src/images/icon_128.png' \
-    '/workspace/src/resources/icons/openterfaceQT.png' \
-    '/workspace/src/icons/openterface.png'; do
-    if [ -f "$icon_path" ]; then
-        cp "$icon_path" "appimage/AppDir/usr/share/icons/hicolor/256x256/apps/openterfaceqt.png"
-        cp "$icon_path" "appimage/AppDir/usr/share/pixmaps/openterfaceqt.png"
-        echo "✅ Icon copied from $icon_path"
-        ICON_FOUND=true
-        break
-    fi
-done
-
-if [ "$ICON_FOUND" = false ]; then
-    echo '⚠️ No icon found, creating placeholder...'
-    # Create a minimal PNG placeholder using ImageMagick if available
-    convert -size 64x64 xc:blue appimage/AppDir/usr/share/pixmaps/openterfaceqt.png 2>/dev/null || {
-        echo 'No ImageMagick, using text placeholder...'
-        echo 'OpenterfaceQT Icon' > appimage/AppDir/usr/share/pixmaps/openterfaceqt.txt
-    }
-fi
-
-# Copy icon to root  
-cp appimage/AppDir/usr/share/pixmaps/openterfaceqt.png appimage/AppDir/ 2>/dev/null || true
+# Install icons with both icon names:
+#	1. com.openterface.openterfaceQT - for FreeDesktop icon theme lookup
+#	2. openterfaceQT - as fallback for legacy applications
+ICONDIR="$APPDIR/usr/share/icons/hicolor"
+PMAPDIR="$APPDIR/usr/share/pixmaps"
+ICON=/workspace/src/images/icon_256.png
+cp $ICON "$ICONDIR/256x256/apps/openterfaceqt.png"
+cp $ICON "$ICONDIR/256x256/apps/com.openterface.openterfaceQT.png"
+cp $ICON "$PMAPDIR/openterfaceqt.png"
+cp $ICON "$PMAPDIR/com.openterface.openterfaceQT.png"
+cp $ICON "$APPDIR/openterfaceqt.png"
+cp $ICON "$APPDIR/com.openterface.openterfaceQT.png"
+ICON=/workspace/src/images/icon_128.png
+cp $ICON "$ICONDIR/128x128/apps/openterfaceqt.png"
+cp $ICON "$ICONDIR/128x128/apps/com.openterface.openterfaceQT.png"
+ok "Initial AppImage setup complete"
 
 # Continue to comprehensive AppImage creation section with Docker runtime support
 # (This section was simplified and moved to the end of the script for proper runtime handling)
-echo "✅ Initial AppImage setup complete"
-echo "✅ Proceeding to comprehensive AppImage creation with Docker runtime support"
-cd /workspace
+msg "🔧 Proceeding to AppImage creation with Docker runtime support"
 
-# Copy the executable to the comprehensive AppDir
-cp "${BUILD}/openterfaceQT" "${APPDIR}/usr/bin/openterfaceQT.bin"
-chmod +x "${APPDIR}/usr/bin/openterfaceQT.bin"
-
-# Create desktop file for comprehensive AppImage
+# Create desktop file
+#
 # Keep Exec=openterfaceQT (NOT openterfaceQT.bin) so that linuxdeploy creates
-# the desktop-integration symlink as usr/bin/openterfaceQT -> ../../AppRun, leaving
-# the real ELF binary openterfaceQT.bin untouched.  AppRun always calls .bin directly.
+# the desktop-integration symlink as usr/bin/openterfaceQT -> ../../AppRun,
+# leaving the real ELF binary openterfaceQT.bin untouched.
+#
+# AppRun always calls .bin directly.
 sed -e 's|^Exec=.*$|Exec=openterfaceQT|g' \
-	"${SRC}/packaging/com.openterface.openterfaceQT.desktop" > "${APPDIR}/usr/share/applications/openterfaceqt.desktop"
-
-# For AppImage, keep the proper FreeDesktop icon name (com.openterface.openterfaceQT)
-# This ensures the icon is found by standard icon theme lookups on all platforms
-# We'll also install with the short name as a fallback
-# (No change needed - keep the original Icon= value in the desktop file)
+	"${SRC}/packaging/com.openterface.openterfaceQT.desktop" \
+	>"${APPDIR}/usr/share/applications/openterfaceqt.desktop"
 
 # Copy desktop file to root of AppDir
 cp "${APPDIR}/usr/share/applications/openterfaceqt.desktop" "${DESKTOP_OUT}"
 
 # Try to find glibc version directory for proper loader setup
 GLIBC_VERSION=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "unknown")
-echo "  ℹ️  Build environment glibc version: $GLIBC_VERSION"
 
-echo "✅ All critical, comprehensive, and platform plugin libraries copied"
-if [ -f "${SRC}/packaging/appimage/com.openterface.openterfaceQT.metainfo.xml" ]; then
-	mkdir -p "${APPDIR}/usr/share/metainfo"
-	cp "${SRC}/packaging/appimage/com.openterface.openterfaceQT.metainfo.xml" "${APPDIR}/usr/share/metainfo/"
-fi
+# Copy metainfo file
+cp "${SRC}/packaging/com.openterface.openterfaceQT.metainfo.xml" "${APPDIR}/usr/share/metainfo/" || fat "Cannot copy metainfo file"
 
-# Copy translations if present
-if ls "${BUILD}"/openterface_*.qm >/dev/null 2>&1; then
-	mkdir -p "${APPDIR}/usr/share/openterfaceQT/translations"
-	cp "${BUILD}"/openterface_*.qm "${APPDIR}/usr/share/openterfaceQT/translations/" || true
-fi
-
-# Try to locate an icon and install it as openterfaceQT.png
-ICON_SRC=""
-for p in \
-	"${SRC}/images/icon_256.png" \
-	"${SRC}/images/icon_256.svg" \
-	"${SRC}/images/icon_128.png" \
-	"${SRC}/images/icon_64.png" \
-	"${SRC}/images/icon_32.png" \
-	"${SRC}/resources/icons/openterfaceQT.png" \
-	"${SRC}/resources/icons/openterface.png" \
-	"${SRC}/icons/openterfaceQT.png" \
-	"${SRC}/icons/openterface.png" \
-	"${SRC}"/openterface*.png \
-	"${SRC}"/resources/*.png; do
-	if [ -f "$p" ]; then ICON_SRC="$p"; break; fi
-done
-if [ -n "${ICON_SRC}" ]; then
-	ICON_EXT="${ICON_SRC##*.}"
-	# Install with both icon names:
-	# 1. com.openterface.openterfaceQT - for FreeDesktop icon theme lookup (standard)
-	# 2. openterfaceQT - as fallback for legacy applications
-	if [ "${ICON_EXT}" = "svg" ]; then
-		mkdir -p "${APPDIR}/usr/share/icons/hicolor/scalable/apps"
-		cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/com.openterface.openterfaceQT.svg" || true
-		cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/openterfaceQT.svg" || true
-	else
-		mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
-		cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/com.openterface.openterfaceQT.${ICON_EXT}" || true
-		cp "${ICON_SRC}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/openterfaceQT.${ICON_EXT}" || true
-	fi
-	# Also copy to pixmaps and root for maximum compatibility
-	mkdir -p "${APPDIR}/usr/share/pixmaps"
-	cp "${ICON_SRC}" "${APPDIR}/usr/share/pixmaps/com.openterface.openterfaceQT.${ICON_EXT}" || true
-	cp "${ICON_SRC}" "${APPDIR}/usr/share/pixmaps/openterfaceqt.${ICON_EXT}" || true
-	cp "${ICON_SRC}" "${APPDIR}/com.openterface.openterfaceQT.${ICON_EXT}" || true
-	cp "${ICON_SRC}" "${APPDIR}/openterfaceqt.${ICON_EXT}" || true
-else
-	echo "No icon found; continuing without a custom icon."
-fi
+# Copy translations
+cp "${BUILD_DIR}"/openterface_*.qm "${APPDIR}/usr/share/openterfaceQT/translations/"
 
 # Prefer preinstalled linuxdeploy and plugin in the image; fallback to download
 TOOLS_DIR="${APPIMAGE_DIR}/tools"
@@ -661,7 +613,7 @@ echo "=== LinuxDeploy Command Debug ==="
 echo "LINUXDEPLOY_BIN: ${LINUXDEPLOY_BIN}"
 echo "APPDIR: ${APPDIR}"
 echo "DESKTOP_OUT: ${DESKTOP_OUT}"
-echo "ICON_SRC: ${ICON_SRC}"
+echo "ICON_SRC: ${ICON}"
 echo "USE_QT_PLUGIN: ${USE_QT_PLUGIN}"
 echo "================================"
 
@@ -770,8 +722,8 @@ LINUXDEPLOY_ARGS=(
 	"--desktop-file" "${DESKTOP_OUT}"
 )
 
-if [ -n "${ICON_SRC}" ]; then
-	LINUXDEPLOY_ARGS+=("--icon-file" "${ICON_SRC}")
+if [ -n "${ICON}" ]; then
+	LINUXDEPLOY_ARGS+=("--icon-file" "${ICON}")
 fi
 
 if [ "${USE_QT_PLUGIN}" = "true" ]; then
@@ -789,8 +741,8 @@ LINUXDEPLOY_ARGS_NO_OUTPUT=(
 	"--desktop-file" "${DESKTOP_OUT}"
 )
 
-if [ -n "${ICON_SRC}" ]; then
-	LINUXDEPLOY_ARGS_NO_OUTPUT+=("--icon-file" "${ICON_SRC}")
+if [ -n "${ICON}" ]; then
+	LINUXDEPLOY_ARGS_NO_OUTPUT+=("--icon-file" "${ICON}")
 fi
 
 if [ "${USE_QT_PLUGIN}" = "true" ]; then
@@ -929,7 +881,7 @@ _bin="${APPDIR}/usr/bin/openterfaceQT.bin"
 if [ -L "$_bin" ] || ! file "$_bin" 2>/dev/null | grep -q 'ELF'; then
 	echo "⚠️  openterfaceQT.bin was replaced by linuxdeploy (symlink or non-ELF); restoring real binary"
 	rm -f "$_bin"
-	cp "${BUILD}/openterfaceQT" "$_bin"
+	cp "${BUILD_DIR}/openterfaceQT" "$_bin"
 	chmod +x "$_bin"
 	echo "✓ Restored openterfaceQT.bin as real ELF binary"
 fi
